@@ -1,56 +1,69 @@
-# Импорт необходимых библиотек
 import pandas as pd
-import numpy as np
 import yfinance as yf
 import statsmodels.formula.api as smf
 import pandas_datareader.data as web
-import matplotlib.pyplot as plt
 
-# Определение параметров
-ASSETS = ['AMZN', 'GOOG', 'AAPL', 'MSFT']
-WEIGHTS = [0.25, 0.25, 0.25, 0.25]
-START_DATE = '2009-12-31'
+# Параметры
+RISKY_ASSET = 'AMZN'
+START_DATE = '2013-12-31'
 END_DATE = '2018-12-31'
 
-# Загрузка данных о факторах
+# Получение данных трехфакторной модели
 df_three_factor = web.DataReader('F-F_Research_Data_Factors', 'famafrench', start=START_DATE)[0]
-df_three_factor = df_three_factor.div(100)
+df_three_factor.index = df_three_factor.index.astype(str)  # Преобразование индекса в строку
 
-# Изменение формата индекса
-df_three_factor.index = df_three_factor.index.astype(str)
+# Получение данных фактора моментума
+df_mom = web.DataReader('F-F_Momentum_Factor', 'famafrench', start=START_DATE)[0]
+df_mom.index = df_mom.index.astype(str)  # Преобразование индекса в строку
 
-# Загрузка цен на рискованные активы из Yahoo Finance
-asset_df = yf.download(ASSETS, start=START_DATE, end=END_DATE, progress=False)
-print(f'Скачано {asset_df.shape[0]} данных.')
+# Получение данных пятфакторной модели
+df_five_factor = web.DataReader('F-F_Research_Data_5_Factors_2x3', 'famafrench', start=START_DATE)[0]
+df_five_factor.index = df_five_factor.index.astype(str)  # Преобразование индекса в строку
 
-# Расчет ежемесячной доходности рискованных активов
-asset_df = asset_df['Adj Close'].resample('M').last().pct_change().dropna()
-asset_df.index = asset_df.index.strftime('%Y-%m')
+# Загрузка данных рискованного актива
+asset_df = yf.download(RISKY_ASSET, start=START_DATE, end=END_DATE, progress=False)
 
-# Расчёт доходности портфеля
-asset_df['portfolio_returns'] = np.matmul(asset_df[ASSETS].values, WEIGHTS)
+# Вычисление месячной доходности для рискованного актива
+y = asset_df['Adj Close'].resample('M').last().pct_change().dropna()
+y.index = y.index.strftime('%Y-%m')  # Форматирование индекса как строки
+y.name = 'return'  # Название серии доходности
 
-# Объединение наборов данных
-ff_data = asset_df.join(df_three_factor).drop(ASSETS, axis=1)
-ff_data.columns = ['portf_rtn', 'mkt', 'smb', 'hml', 'rf']
-ff_data['portf_ex_rtn'] = ff_data.portf_rtn - ff_data.rf
+# Объединение всех наборов данных
+four_factor_data = df_three_factor.join(df_mom).join(y)
 
-# Определение функции для скользящей n-факторной модели
-def rolling_factor_model(input_data, formula, window_size):
-    coeffs = []
-    for start_index in range(len(input_data) - window_size + 1):
-        end_index = start_index + window_size
-        ff_model = smf.ols(formula=formula, data=input_data[start_index:end_index]).fit()
-        coeffs.append(ff_model.params)
-    coeffs_df = pd.DataFrame(coeffs, index=input_data.index[window_size - 1:])
-    return coeffs_df
+# Переименование столбцов
+four_factor_data.columns = ['mkt', 'smb', 'hml', 'rf', 'mom', 'rtn']
 
-# Оценка скользящей трехфакторной модели
-MODEL_FORMULA = 'portf_ex_rtn ~ mkt + smb + hml'
-results_df = rolling_factor_model(ff_data, MODEL_FORMULA, window_size=60)
+# Деление всех столбцов, кроме 'rtn', на 100
+four_factor_data.loc[:, four_factor_data.columns != 'rtn'] /= 100
 
-# Вывод результатов на график
-results_df.plot(title='Rolling Fama-French Three-Factor Model')
-plt.xlabel('Date')
-plt.ylabel('Coefficient Value')
-plt.show()
+# Выбор нужного периода
+four_factor_data = four_factor_data.loc[START_DATE:END_DATE]
+
+# Вычисление избыточной доходности
+four_factor_data['excess_rtn'] = four_factor_data.rtn - four_factor_data.rf
+
+# Объединение данных пятфакторной модели
+five_factor_data = df_five_factor.join(y)
+
+# Переименование столбцов
+five_factor_data.columns = ['mkt', 'smb', 'hml', 'rmw', 'cma', 'rf', 'rtn']
+
+# Деление всех столбцов, кроме 'rtn', на 100
+five_factor_data.loc[:, five_factor_data.columns != 'rtn'] /= 100
+
+# Выбор нужного периода
+five_factor_data = five_factor_data.loc[START_DATE:END_DATE]
+
+# Вычисление избыточной доходности
+five_factor_data['excess_rtn'] = five_factor_data.rtn - five_factor_data.rf
+
+# Построение четырехфакторной модели
+four_factor_model = smf.ols(formula='excess_rtn ~ mkt + smb + hml + mom', data=four_factor_data).fit()
+print("Сводка четырехфакторной модели:")
+print(four_factor_model.summary())
+
+# Построение пятфакторной модели
+five_factor_model = smf.ols(formula='excess_rtn ~ mkt + smb + hml + rmw + cma', data=five_factor_data).fit()
+print("\nСводка пятфакторной модели:")
+print(five_factor_model.summary())
