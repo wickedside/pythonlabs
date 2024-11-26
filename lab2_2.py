@@ -1,77 +1,99 @@
+# Импортируем необходимые библиотеки
 import pandas as pd
-import seaborn as sns
-from prophet import Prophet  # Используем новую библиотеку
+import yfinance as yf
+from prophet import Prophet
 import matplotlib.pyplot as plt
+import seaborn as sns
 
-# Загрузка данных из CSV файла
-csv_file_path = r'./gold_prices.csv'
-df = pd.read_csv(csv_file_path, skiprows=2)
+# Загружаем ежедневные цены на золото с Yahoo Finance
+df = yf.download('GC=F',
+                 start='2000-01-01',
+                 end='2005-12-31',
+                 interval='1d',
+                 progress=False)
 
-# Проверка текущих столбцов
-print("Столбцы после пропуска строк:", df.columns)
+# Подготавливаем данные
+df.reset_index(inplace=True)
 
-# Используем первый столбец как 'ds' и второй числовой столбец как 'y'
-df.rename(columns={'Date': 'ds', 'Unnamed: 1': 'y'}, inplace=True)
+# Проверяем названия столбцов до переименования
+print("Столбцы до переименования:", df.columns.tolist())
 
-# Преобразование столбца 'ds' в формат даты
-df['ds'] = pd.to_datetime(df['ds'], errors='coerce')
+# Проверяем, имеет ли DataFrame MultiIndex столбцов
+if isinstance(df.columns, pd.MultiIndex):
+    # Если имеет, преобразуем его в одномерный
+    df.columns = ['_'.join(col).strip() if col[1] else col[0] for col in df.columns.values]
+    print("Столбцы после преобразования MultiIndex в одномерный:", df.columns.tolist())
 
-# Удаление строк с некорректными датами
-df = df.dropna(subset=['ds', 'y'])
+# Переименовываем столбцы и выбираем только необходимые
+# Теперь столбцы должны быть: ['ds', 'y']
+# Используем правильное имя столбца после преобразования MultiIndex
+df = df[['Date', 'Adj Close_GC=F']].rename(columns={'Date': 'ds', 'Adj Close_GC=F': 'y'})
 
-# Преобразование столбца 'y' в числовой формат
-df['y'] = pd.to_numeric(df['y'], errors='coerce')
+# Проверяем названия столбцов после переименования
+print("Столбцы после переименования:", df.columns.tolist())
 
-# Удаление строк с некорректными значениями 'y'
-df = df.dropna(subset=['y'])
+# Проверяем тип данных столбца 'y'
+print("Тип данных столбца 'y':", type(df['y']))
 
-# Оставляем только нужные столбцы
-df = df[['ds', 'y']]
+# Выводим первые несколько строк столбца 'y'
+print("Первые 5 строк столбца 'y':")
+print(df['y'].head())
 
-# Проверка данных после обработки
-print(df.head())
+# Удаляем пропущенные значения
+df.dropna(inplace=True)
 
-# Фильтрация данных по дате
-start_date = '2000-01-01'
-end_date = '2005-12-31'
-df_filtered = df[(df['ds'] >= start_date) & (df['ds'] <= end_date)]
-
-# Проверка, что данные не пустые
-if df_filtered.empty:
-    print("Нет данных в указанных пределах дат.")
+# Проверяем, является ли 'y' Series
+if isinstance(df['y'], pd.Series):
+    # Преобразуем столбец 'y' в числовой тип
+    df['y'] = pd.to_numeric(df['y'], errors='coerce')
 else:
-    # Создание и обучение модели Prophet
-    model_prophet = Prophet(seasonality_mode='additive')
-    model_prophet.add_seasonality(name='monthly', period=30.5, fourier_order=5)
-    model_prophet.fit(df_filtered)
+    # Если 'y' всё ещё DataFrame, выбираем первый столбец
+    df['y'] = pd.to_numeric(df['y'].iloc[:, 0], errors='coerce')
 
-    # Создание будущих дат для предсказания
-    df_future = model_prophet.make_future_dataframe(periods=365)
-    df_pred = model_prophet.predict(df_future)
+# Удаляем строки с некорректными значениями в 'y'
+df.dropna(subset=['y'], inplace=True)
 
-    # Выбор нужных колонок
-    selected_columns = ['ds', 'yhat_lower', 'yhat_upper', 'yhat']
-    df_pred = df_pred.loc[:, selected_columns].reset_index(drop=True)
+# Разделяем данные на обучающую и тестовую выборки
+df['ds'] = pd.to_datetime(df['ds'])
+train_indices = df['ds'].dt.year < 2005
+df_train = df.loc[train_indices].reset_index(drop=True)
+df_test = df.loc[~train_indices].reset_index(drop=True)
 
-    # Подготовка тестовой выборки для объединения с предсказаниями
-    df_test = df_filtered.copy()  # Используем отфильтрованные данные как тестовые
-    df_test = df_test.merge(df_pred, on=['ds'], how='left')
+# Проверка структуры обучающей выборки
+print("\nОбучающая выборка:")
+print(df_train.head())
+print(df_train.dtypes)
 
-    # Установка индекса по дате
-    df_test.set_index('ds', inplace=True)
+# Создаем и обучаем модель Prophet
+model_prophet = Prophet(seasonality_mode='additive')
+model_prophet.add_seasonality(name='monthly', period=30.5, fourier_order=5)
+model_prophet.fit(df_train)
 
-    # Визуализация фактических и предсказанных цен на золото
-    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+# Прогнозируем цены на золото
+df_future = model_prophet.make_future_dataframe(periods=365)
+df_forecast = model_prophet.predict(df_future)
 
-    ax = sns.lineplot(data=df_test[['y', 'yhat_lower', 'yhat_upper', 'yhat']])
+# Строим прогноз
+fig1 = model_prophet.plot(df_forecast)
+plt.title('Forecasted Gold Prices')
+plt.show()
 
-    ax.fill_between(df_test.index,
-                    df_test['yhat_lower'],
-                    df_test['yhat_upper'],
-                    alpha=0.3)
+# Проверяем разложение временного ряда
+fig2 = model_prophet.plot_components(df_forecast)
+plt.show()
 
-    ax.set(title='Gold Price - Actual vs. Predicted',
-           xlabel='Date',
-           ylabel='Gold Price ($)')
+# Объединяем тестовый набор с прогнозами
+df_pred = df_forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']]
+df_compare = pd.merge(df_test, df_pred, on='ds', how='left')
+df_compare.set_index('ds', inplace=True)
 
-    plt.show()
+# Строим график фактических и прогнозных цен
+plt.figure(figsize=(12,6))
+plt.plot(df_compare.index, df_compare['y'], label='Actual', color='blue')
+plt.plot(df_compare.index, df_compare['yhat'], label='Forecast', color='orange')
+plt.fill_between(df_compare.index, df_compare['yhat_lower'], df_compare['yhat_upper'], color='lightblue', alpha=0.5)
+plt.title('Gold Price - Actual vs Predicted')
+plt.xlabel('Date')
+plt.ylabel('Gold Price ($)')
+plt.legend()
+plt.show()

@@ -1,31 +1,29 @@
+# Импорт необходимых библиотек
+import pandas as pd
 import yfinance as yf
+from statsmodels.tsa.seasonal import seasonal_decompose
 import matplotlib.pyplot as plt
 
-# Загрузка данных о золоте (например, тикер GLD)
-df = yf.download('GLD', start='2000-01-01', end='2011-12-31')
+# Загрузка данных цен на золото с Yahoo Finance
+# Используем тикер 'GC=F' для золота (Gold Futures)
+df = yf.download('GC=F', start='2000-01-01', end='2011-12-31', interval='1mo')
 
-# Переименование колонки для удобства
-df.rename(columns={'Close': 'price'}, inplace=True)
+# Переименовываем столбец 'Adj Close' в 'price'
+df.rename(columns={'Adj Close': 'price'}, inplace=True)
 
-# Расчет скользящего среднего и стандартного отклонения
+# Удаляем ненужные столбцы и пропуски
+df = df[['price']].dropna()
+
+# Добавление скользящего среднего и стандартного отклонения
 WINDOW_SIZE = 12
 df['rolling_mean'] = df['price'].rolling(window=WINDOW_SIZE).mean()
 df['rolling_std'] = df['price'].rolling(window=WINDOW_SIZE).std()
 
-# Сохранение данных в CSV файл
-csv_file_path = 'gold_prices.csv'
-df.to_csv(csv_file_path)
-
-# Визуализация данных
-plt.figure(figsize=(14, 7))
-plt.plot(df['price'], label='Цена золота', color='gold')
-plt.plot(df['rolling_mean'], label='Скользящее среднее', color='blue')
-plt.fill_between(df.index, df['rolling_mean'] - df['rolling_std'], df['rolling_mean'] + df['rolling_std'], 
-                 color='lightblue', alpha=0.5, label='Стандартное отклонение')
-plt.title('Цена золота с скользящим средним и стандартным отклонением')
-plt.xlabel('Дата')
-plt.ylabel('Цена (USD)')
-plt.legend()
+# Построение графика цен на золото
+df[['price', 'rolling_mean', 'rolling_std']].plot(title='Цена на золото')
 plt.show()
 
-print(f"Данные успешно сохранены в {csv_file_path}")
+# Сезонная декомпозиция с использованием мультипликативной модели
+decomposition_results = seasonal_decompose(df['price'], model='multiplicative', period=12)
+decomposition_results.plot().suptitle('Мультипликативная декомпозиция', fontsize=18)
+plt.show()

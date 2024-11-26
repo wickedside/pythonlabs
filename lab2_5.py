@@ -1,109 +1,127 @@
+# Импорт необходимых библиотек
 import pandas as pd
 import numpy as np
+import yfinance as yf
+from datetime import date
 import matplotlib.pyplot as plt
 import seaborn as sns
-from statsmodels.tsa.arima.model import ARIMA
-import statsmodels.api as sm
-from statsmodels.graphics.tsaplots import plot_acf
-from statsmodels.stats.diagnostic import acorr_ljungbox
-import scipy.stats as scs
+from statsmodels.tsa.holtwinters import (ExponentialSmoothing,
+                                         SimpleExpSmoothing,
+                                         Holt)
 
-# Загрузка данных из CSV
-df = pd.read_csv(r'./google_stock_data.csv', parse_dates=['Date'], index_col='Date')
+# Установка цветовой палитры
+plt.set_cmap('cubehelix')
+sns.set_palette('cubehelix')
+COLORS = [plt.cm.cubehelix(x) for x in [0.1, 0.3, 0.5, 0.7]]
 
-# Вывод доступных колонок для анализа
-print(f"Доступные колонки в наборе данных: {df.columns}")
+# Шаг 1: Загрузка данных акций Google
+df = yf.download('GOOG',
+                 start='2010-01-01',
+                 end='2018-12-31',
+                 progress=False)
 
-# Убедимся, что используется правильная колонка
-if 'adj_close' in df.columns:
-    goog = df['adj_close'].resample('W').last().rename('adj_close')
-    print("Используется колонка 'adj_close' для анализа.")
-else:
-    print("Колонка 'adj_close' не найдена!")
-    goog = None
+# Шаг 2: Пересчет данных на ежемесячную периодичность
+goog = df.resample('M').last().rename(columns={'Adj Close': 'adj_close'})['adj_close']
 
-# Разность первого порядка
-if goog is not None:
-    goog_diff = goog.diff().dropna()
+# Шаг 3: Разделение выборки на обучающую и тестовую
+train_indices = goog.index.year < 2018
+goog_train = goog[train_indices]
+goog_test = goog[~train_indices]
+test_length = len(goog_test)
 
-    # Если после вычисления разности первого порядка нет данных, пропустим построение графиков и тестов
-    if goog_diff.empty:
-        print("Нет доступных данных для разностей первого порядка (goog_diff пуст). Пропускаем графики.")
-    else:
-        # Построение графиков
-        fig, ax = plt.subplots(2, sharex=True)
-        goog.plot(title="Стоимость акций Google", ax=ax[0])
-        goog_diff.plot(ax=ax[1], title='Разности первого порядка')
-        plt.show()
+# Шаг 4: График цен акций Google
+goog.plot(title="Цена акций Google")
+plt.xlabel('Дата')
+plt.ylabel('Цена')
+plt.show()
 
-        # Тест на автокорреляцию
-        print("Выполняется тест на автокорреляцию...")
-        plot_acf(goog_diff)
-        plt.show()
-else:
-    print("Пропускаем тест на автокорреляцию из-за отсутствия данных в goog_diff.")
+# Шаг 5: Подгонка моделей SES и прогнозирование
+# Модель 1: alpha=0.2
+ses_1 = SimpleExpSmoothing(goog_train).fit(smoothing_level=0.2, optimized=False)
+ses_forecast_1 = ses_1.forecast(test_length)
 
-# Тесты ADF и KPSS (пример вывода)
-print("Статистика теста ADF: -12.79 (p-значение: 0.00)")
-print("Статистика теста KPSS: 0.11 (p-значение: 0.10)")
+# Модель 2: alpha=0.5
+ses_2 = SimpleExpSmoothing(goog_train).fit(smoothing_level=0.5, optimized=False)
+ses_forecast_2 = ses_2.forecast(test_length)
 
-# Модель ARIMA
-if goog is not None and not goog.empty:
-    arima = ARIMA(goog, order=(2, 1, 1)).fit()  # Убрали параметр disp
-    print(arima.summary())
+# Модель 3: Автоматическое определение alpha
+ses_3 = SimpleExpSmoothing(goog_train).fit()
+alpha = ses_3.model.params['smoothing_level']
+ses_forecast_3 = ses_3.forecast(test_length)
 
-    def arima_diagnostics(resids, n_lags=40):
-        # Построение диаграмм для диагностики
-        fig, ((ax1, ax2), (ax3, ax4)) = plt.subplots(2, 2)
-        r = resids
-        resids = (r - np.nanmean(r)) / np.nanstd(r)
-        resids_nonmissing = resids[~(np.isnan(resids))]
+# Шаг 6: График результатов моделей SES
+goog.plot(color=COLORS[0],
+          title='Simple Exponential Smoothing',
+          label='Фактические',
+          legend=True)
+ses_forecast_1.plot(color=COLORS[1], legend=True, label=r'$\alpha=0.2$')
+ses_1.fittedvalues.plot(color=COLORS[1])
+ses_forecast_2.plot(color=COLORS[2], legend=True, label=r'$\alpha=0.5$')
+ses_2.fittedvalues.plot(color=COLORS[2])
+ses_forecast_3.plot(color=COLORS[3], legend=True, label=r'$\alpha={0:.4f}$'.format(alpha))
+ses_3.fittedvalues.plot(color=COLORS[3])
+plt.xlabel('Дата')
+plt.ylabel('Цена')
+plt.show()
 
-        # Стандартизированные остатки по времени
-        sns.lineplot(x=np.arange(len(resids)), y=resids, ax=ax1)
-        ax1.set_title('Стандартизированные остатки')
+# Шаг 7: Подгонка моделей Holt's Smoothing и прогнозирование
+# Модель Холта с линейным трендом
+hs_1 = Holt(goog_train).fit()
+hs_forecast_1 = hs_1.forecast(test_length)
 
-        # Распределение стандартизированных остатков
-        x_lim = (-1.96 * 2, 1.96 * 2)
-        r_range = np.linspace(x_lim[0], x_lim[1])
-        norm_pdf = scs.norm.pdf(r_range)
+# Модель Холта с экспоненциальным трендом
+hs_2 = Holt(goog_train, exponential=True).fit()
+hs_forecast_2 = hs_2.forecast(test_length)
 
-        sns.histplot(resids_nonmissing, kde=True, stat="density", ax=ax2)
-        ax2.plot(r_range, norm_pdf, 'g', lw=2, label='N(0,1)')
-        ax2.set_title('Распределение стандартизированных остатков')
-        ax2.set_xlim(x_lim)
-        ax2.legend()
+# Модель Холта с экспоненциальным трендом и затуханием
+hs_3 = Holt(goog_train, exponential=True, damped_trend=True).fit()
+hs_forecast_3 = hs_3.forecast(test_length)
 
-        # Q-Q график
-        sm.qqplot(resids_nonmissing, line='s', ax=ax3)
-        ax3.set_title('Q-Q график')
+# Шаг 8: График результатов моделей Holt's Smoothing
+goog.plot(color=COLORS[0],
+          title="Модели сглаживания Холта",
+          label='Фактические',
+          legend=True)
+hs_1.fittedvalues.plot(color=COLORS[1])
+hs_forecast_1.plot(color=COLORS[1], legend=True, label='Линейный тренд')
+hs_2.fittedvalues.plot(color=COLORS[2])
+hs_forecast_2.plot(color=COLORS[2], legend=True, label='Экспоненциальный тренд')
+hs_3.fittedvalues.plot(color=COLORS[3])
+hs_forecast_3.plot(color=COLORS[3], legend=True, label='Экспоненциальный тренд (затухающий)')
+plt.xlabel('Дата')
+plt.ylabel('Цена')
+plt.show()
 
-        # ACF график
-        plot_acf(resids, ax=ax4, lags=n_lags, alpha=0.05)
-        ax4.set_title('ACF график')
+# Шаг 9: Подгонка моделей Холта-Винтерса и прогнозирование
+SEASONAL_PERIODS = 12
 
-        return fig
+# Модель Холта-Винтерса с экспоненциальным трендом
+hw_1 = ExponentialSmoothing(goog_train,
+                            trend='mul',
+                            seasonal='add',
+                            seasonal_periods=SEASONAL_PERIODS).fit()
+hw_forecast_1 = hw_1.forecast(test_length)
 
-    # Диагностика остатков модели ARIMA
-    arima_diagnostics(arima.resid, 40)
+# Модель Холта-Винтерса с экспоненциальным трендом и затуханием
+hw_2 = ExponentialSmoothing(goog_train,
+                            trend='mul',
+                            seasonal='add',
+                            seasonal_periods=SEASONAL_PERIODS,
+                            damped_trend=True).fit()
+hw_forecast_2 = hw_2.forecast(test_length)
 
-    # Тест Льюнга-Бокса
-    ljung_box_results = acorr_ljungbox(arima.resid.dropna(), lags=[i for i in range(1, 21)], return_df=True)
+# Шаг 10: График результатов моделей Холта-Винтерса
+goog.plot(color=COLORS[0],
+          title="Модели сезонного сглаживания Холта-Винтерса",
+          label='Фактические',
+          legend=True)
+hw_1.fittedvalues.plot(color=COLORS[1])
+hw_forecast_1.plot(color=COLORS[1], legend=True, label='Сезонное сглаживание')
+phi = hw_2.model.params['damping_trend']
+plot_label = f'Сезонное сглаживание (затухание с $\phi={phi:.4f}$)'
+hw_2.fittedvalues.plot(color=COLORS[2])
+hw_forecast_2.plot(color=COLORS[2], legend=True, label=plot_label)
+plt.xlabel('Дата')
+plt.ylabel('Цена')
+plt.show()
 
-    # Проверка успешности получения результатов теста Льюнга-Бокса
-    print(ljung_box_results)
-
-    # Построение p-значений теста Льюнга-Бокса
-    fig, ax = plt.subplots(1, figsize=[16, 5])
-    if not ljung_box_results['lb_pvalue'].isnull().all():
-        sns.scatterplot(x=ljung_box_results.index,
-                         y=ljung_box_results['lb_pvalue'], ax=ax)
-        ax.axhline(0.05, ls='--', c='r')
-        ax.set(title="Результаты теста Льюнга-Бокса", xlabel='Лаг', ylabel='p-значение')
-        ax.set_ylim(0, 1)
-        ax.grid(True)
-        plt.show()
-    else:
-        print("Нет доступных p-значений для построения после очистки.")
-else:
-    print("Нет данных для построения модели ARIMA.")
